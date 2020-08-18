@@ -3,15 +3,17 @@
 #[global_allocator]
 static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
 
-use indicatif::ParallelProgressIterator;
 use bzip2::read::BzDecoder;
 use clap::{App, Arg};
-use rayon::prelude::*;
-use regex::{Regex, RegexBuilder};
 use fnv::{FnvHashMap, FnvHashSet};
+use indicatif::ParallelProgressIterator;
+use rayon::prelude::*;
+use regex::Regex;
 use std::fs::File;
 use std::io::{prelude::*, BufReader, BufWriter, SeekFrom};
 use std::path::Path;
+
+mod wikitext;
 
 fn main() {
     let args = App::new("English Wiki Frequency List Generator")
@@ -73,8 +75,19 @@ fn main() {
 
     let start = std::time::Instant::now();
     let wordset = wiktionary_index_to_wordset(windex_path);
-    println!("Read wiktionary index in {:?}, found {} items", start.elapsed(), wordset.len());
-    println!("A few words from the wordlist: {:?}", wordset.iter().filter(|w| w.len() <= 5).take(10).collect::<Vec<_>>());
+    println!(
+        "Read wiktionary index in {:?}, found {} items",
+        start.elapsed(),
+        wordset.len()
+    );
+    println!(
+        "A few words from the wordlist: {:?}",
+        wordset
+            .iter()
+            .filter(|w| w.len() <= 5)
+            .take(10)
+            .collect::<Vec<_>>()
+    );
 
     let start = std::time::Instant::now();
     let mut counts: Vec<_> = ArticleBlockIter::new(dump_path, index_path)
@@ -91,7 +104,7 @@ fn main() {
         })
         .into_iter()
         .collect();
-    
+
     println!("Counting words took {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
@@ -99,7 +112,8 @@ fn main() {
     let mut writer =
         BufWriter::new(File::create("frequency_list.txt").expect("failed to open output file"));
     for (i, (k, v)) in counts.into_iter().enumerate() {
-        writeln!(writer, "{} {}", k, v).unwrap_or_else(|e| panic!("failed to write line {}: {:?}", i, e));
+        writeln!(writer, "{} {}", k, v)
+            .unwrap_or_else(|e| panic!("failed to write line {}: {:?}", i, e));
     }
 
     println!("Sorting and saving took {:?}", start.elapsed());
@@ -122,7 +136,7 @@ fn main() {
 //         let mut c = vec![0];
 //         index_file.seek(SeekFrom::End(-i)).unwrap();
 //         index_file.read(&mut c).unwrap();
-        
+
 //         if c[0] == b'\n' {
 //             break;
 //         }
@@ -299,23 +313,17 @@ impl std::fmt::Debug for DumpBlock {
             f,
             "DumpBlock {{ {}-{} ({}-{}), {} descriptors, {} bytes in xml }}",
             self.descriptors[0].title,
-            self.descriptors[self.descriptors.len()-1].title,
+            self.descriptors[self.descriptors.len() - 1].title,
             self.descriptors[0].id,
-            self.descriptors[self.descriptors.len()-1].id,
+            self.descriptors[self.descriptors.len() - 1].id,
             self.descriptors.len(),
-            self.raw_xml.len())
+            self.raw_xml.len()
+        )
     }
 }
 
 impl DumpBlock {
     pub fn process(&mut self, wordset: &FnvHashSet<String>) -> FnvHashMap<String, usize> {
-        thread_local! {
-            static WORD_REGEX: Regex = RegexBuilder::new(r"\w(?:(?:\.|\-|')?\w+)*")
-                .case_insensitive(true)
-                .build()
-                .expect("WORD_REGEX build failed");
-        }
-
         // println!(
         //     "Reading ID range {}-{} ({} entries)",
         //     self.descriptors[0].id,
@@ -325,29 +333,27 @@ impl DumpBlock {
 
         let mut counts = FnvHashMap::default();
 
-        WORD_REGEX.with(|re| {
-            let doc = roxmltree::Document::parse(&*self.raw_xml)
-                .unwrap_or_else(|e| panic!("failed to parse xml in {:?}: {:?}\n{:#?}", self, e, &self.raw_xml[..1000]));
+        let doc = roxmltree::Document::parse(&*self.raw_xml).unwrap_or_else(|e| {
+            panic!(
+                "failed to parse xml in {:?}: {:?}\n{:#?}",
+                self,
+                e,
+                &self.raw_xml[..1000]
+            )
+        });
 
-            for text_node in doc.descendants().filter(|n| n.has_tag_name("text")) {
-                let text = text_node.text();
-                if text.is_none() { continue; }
+        for text_node in doc.descendants().filter(|n| n.has_tag_name("text")) {
+            let text = text_node.text();
+            if text.is_none() {
+                continue;
+            }
 
-                for mat in re.find_iter(text.unwrap()) {
-                    let word: String = mat.as_str()
-                        .chars()
-                        .filter(char::is_ascii_alphabetic)
-                        .map(|c| c.to_ascii_lowercase())
-                        .collect();
-                    
-                    if word.is_empty() { continue; }
-                    
-                    if wordset.contains(&word) {
-                        *counts.entry(word).or_insert(0) += 1;
-                    }
+            for word in wikitext::wikitext_words(text.unwrap()) {
+                if wordset.contains(&word) {
+                    *counts.entry(word).or_insert(0) += 1;
                 }
             }
-        });
+        }
 
         // println!(
         //     "Counted {} words in {} entries",
